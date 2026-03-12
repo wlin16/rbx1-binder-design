@@ -1,0 +1,28 @@
+# Core JAX stack
+jax[cuda12]
+dm-haiku>=0.0.13
+equinox>=0.11.0
+jaxtyping>=0.2.28
+optax>=0.2.4
+
+# AlphaFold 3
+# Install from source: pip install git+https://github.com/google-deepmind/alphafold3.git
+# alphafold3
+
+# Structure I/O
+gemmi>=0.6.5
+
+# ProteinMPNN (inverse folding)
+# joltz: pip install git+https://github.com/nboyd/joltz --no-deps
+# boltz: pip install boltz --no-deps
+pytorch_lightning
+
+# PyTorch CPU (for ProteinMPNN)
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Other
+ml-collections>=1.0.0
+einops>=0.8.0
+
+# Cloud deployment
+modal>=0.73.0

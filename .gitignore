@@ -1,0 +1,14 @@
+*.bin
+*.bin.zst
+*.pkl
+__pycache__/
+*.pyc
+*.egg-info/
+.firecrawl/
+.claude/
+results/
+*.cif
+*.pdb
+af3_mosaic/
+LabClaw/
+presentation/

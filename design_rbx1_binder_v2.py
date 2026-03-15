@@ -26,7 +26,8 @@ from mosaic.optimizers import simplex_APGM
 from mosaic.common import TOKENS
 import mosaic.losses.structure_prediction as sp
 from mosaic.losses.structure_prediction import AF3IPTMLoss
-from mosaic.losses.protein_mpnn import ProteinMPNNLoss
+from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
+from mosaic.losses.transformations import NoCys
 from mosaic.proteinmpnn.mpnn import load_mpnn
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,10 +58,10 @@ def hotspot_biased_pssm(binder_length: int, key: jax.Array) -> jnp.ndarray:
       2. Add small random noise (Dirichlet) per position for diversity across trials
       3. Normalise to simplex
     """
-    # Base weights for each of the 20 aa (in TOKENS order: A C D E F G H I K L M N P Q R S T V W Y)
+    # Base weights for 19 aa (TOKENS order minus C: A D E F G H I K L M N P Q R S T V W Y)
+    # NoCys removes C from the alphabet, so PSSM is 19-dimensional
     base_weights = jnp.array([
         0.8,   # A  - small, ok
-        0.3,   # C  - avoid (tends to oxidize / coordinate metals)
         1.5,   # D  - good: pairs with K68 on target
         1.5,   # E  - good: pairs with K68 on target
         0.4,   # F  - bulky aromatic, avoid at interface
@@ -68,7 +69,7 @@ def hotspot_biased_pssm(binder_length: int, key: jax.Array) -> jnp.ndarray:
         0.8,   # H  - ok polar
         0.9,   # I  - moderate hydrophobic (ok for binder core)
         1.5,   # K  - good: pairs with D54/E56 on target
-        0.6,   # L  - reduce from strategy 1 (leucine collapse)
+        0.6,   # L  - reduce (leucine collapse risk)
         0.5,   # M  - moderate
         1.2,   # N  - polar, good for H-bonds
         0.3,   # P  - helix breaker, avoid
@@ -98,30 +99,21 @@ def hotspot_biased_pssm(binder_length: int, key: jax.Array) -> jnp.ndarray:
 
 def build_losses(mpnn):
     """
-    Strategy 2 loss: rebalanced weights to prevent leucine collapse.
-
-    Key changes vs strategy 1:
-      - BinderTargetContact: -1 → -3  (dominant signal in early optimization)
-      - ProteinMPNN:         10 → 2   (was dominating and causing leucine collapse)
+    Loss combination matching the Mosaic reference with hotspot-biased PSSM init.
+    Weights and signs are identical to design_rbx1_binder.py (the reference).
     """
-    loss = (
-        # Structural contact losses (contact signal now dominates early optimization)
-        (-3.0) * sp.BinderTargetContact()
-        + (-1.0) * sp.WithinBinderContact()
-
-        # Confidence — AF3IPTMLoss uses tmscore_adjusted_pae_interface (fully differentiable)
-        + (-1.0) * AF3IPTMLoss()
-        + sp.BinderTargetPAE()
-        + (-1.0) * sp.PLDDTLoss()
-
-        # ipSAE: Interface Predicted Score-Aligned Error (Dunbrack 2025)
-        # Complementary to ipTM — penalises high PAE on interface pairs
-        + (-1.0) * sp.BinderTargetIPSAE()
-
-        # Inverse folding — reduced weight to not overpower contact signal
-        + 2.0 * ProteinMPNNLoss(mpnn=mpnn, num_samples=4)
+    inner_loss = (
+        1.0  * sp.BinderTargetContact()
+        + 1.0  * sp.WithinBinderContact()
+        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=4)
+        + 0.05 * sp.TargetBinderPAE()
+        + 0.05 * sp.BinderTargetPAE()
+        + 0.4  * sp.WithinBinderPAE()
+        + 0.025 * AF3IPTMLoss()
+        + 0.025 * sp.pTMEnergy()
+        + 0.1   * sp.PLDDTLoss()
     )
-    return loss
+    return NoCys(loss=inner_loss)
 
 
 def design(
@@ -138,7 +130,7 @@ def design(
     print(f"Loading AlphaFold 3 from {model_dir}...")
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=1,
+        num_recycling=10,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )
@@ -159,7 +151,7 @@ def design(
     for trial in range(n_candidates):
         key, subkey_opt, subkey_init = jax.random.split(key, 3)
 
-        # Strategy 2: hotspot-biased PSSM initialization
+        # Strategy 2: hotspot-biased PSSM initialization (19-dim, NoCys removes C)
         PSSM_init = hotspot_biased_pssm(binder_length, subkey_init)
         top_aa = [TOKENS[i] for i in jnp.argsort(PSSM_init[0])[-5:]]
         print(f"\n[Trial {trial+1}/{n_candidates}] Top 5 initial aa (pos 0): {top_aa}")
@@ -175,11 +167,12 @@ def design(
         )
         PSSM_opt = best_PSSM
 
-        seq = "".join(TOKENS[int(i)] for i in jnp.argmax(PSSM_opt, axis=-1))
+        full_pssm = NoCys.sequence(PSSM_opt)
+        seq = "".join(TOKENS[int(i)] for i in jnp.argmax(full_pssm, axis=-1))
 
         print(f"  Final sequence: {seq}")
         pred = model.predict(
-            PSSM=PSSM_opt,
+            PSSM=full_pssm,
             features=features,
             writer=None,
             key=subkey_opt,

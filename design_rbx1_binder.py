@@ -7,13 +7,24 @@ but replaces Boltz-2 with official DeepMind AlphaFold 3.
 Usage:
     python design_rbx1_binder.py \
         --model_dir ~/.alphafold3/model \
-        --binder_length 80 \
+        --binder_length 60 \
         --n_steps 200 \
         --output_dir results/
 
-Architecture used (confirmed from AF3 weight file):
-    c_s=384, c_z=128, c_atom=128
-    48 evoformer trunk layers, 6 diffusion layers
+Loss weights mirror the Mosaic reference (escalante-bio blog):
+    1.0  * BinderTargetContact
+    1.0  * WithinBinderContact
+    10.0 * InverseFoldingSequenceRecovery (ProteinMPNN)
+    0.05 * TargetBinderPAE
+    0.05 * BinderTargetPAE
+    0.025 * AF3IPTMLoss  (uses tmscore_adjusted_pae_interface natively)
+    0.4  * WithinBinderPAE
+    0.025 * pTMEnergy
+    0.1  * PLDDTLoss
+Wrapped in NoCys to exclude cysteine from binder.
+
+num_recycling=10: AF3 default (paper uses 10+1 passes).
+diffusion_num_samples/steps=1: minimised for gradient memory on A100-80GB.
 """
 
 import argparse
@@ -31,7 +42,8 @@ from mosaic.optimizers import simplex_APGM
 from mosaic.common import TOKENS
 import mosaic.losses.structure_prediction as sp
 from mosaic.losses.structure_prediction import AF3IPTMLoss
-from mosaic.losses.protein_mpnn import ProteinMPNNLoss
+from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
+from mosaic.losses.transformations import NoCys
 from mosaic.proteinmpnn.mpnn import load_mpnn
 
 
@@ -53,34 +65,39 @@ RBX1_SEQUENCE = "CPICLEMQEPVSTEAEKVLHVTRQKIFPLHPYLEMIRQELENHTLSEALRKA"  # 52 aa 
 
 def build_losses(mpnn):
     """
-    Construct the Mosaic loss combination for binder design.
+    Loss combination matching the Mosaic reference (escalante-bio blog).
 
-    Mirrors the Adaptyv competition setup from the blog post:
-        BinderTargetContact + WithinBinderContact
-        + IPTMLoss + BinderTargetPAE + PLDDTLoss
-        + 10 * ProteinMPNNLoss (inverse folding sequence recoverability)
+    All weights and signs are taken directly from the reference:
+        - Each LossTerm already returns a value with the correct sign for
+          minimisation (negative for things to maximise, positive for things
+          to minimise). NEVER apply a negative multiplier.
+        - AF3IPTMLoss replaces IPTMLoss: uses AF3's native
+          tmscore_adjusted_pae_interface (fully differentiable from trunk).
+        - NoCys wrapper: zeros out Cys probability before passing to the loss,
+          preventing cysteines in the optimised binder.
     """
-    loss = (
-        # Structural contact losses
-        (-1.0) * sp.BinderTargetContact()
-        + (-1.0) * sp.WithinBinderContact()
+    inner_loss = (
+        # Contact losses (return negative values; minimise → more contact)
+        1.0  * sp.BinderTargetContact()
+        + 1.0  * sp.WithinBinderContact()
 
-        # Confidence — AF3IPTMLoss uses tmscore_adjusted_pae_interface (fully differentiable)
-        # instead of reconstructed pae_logits. Falls back to IPTMLoss for non-AF3 models.
-        + (-1.0) * AF3IPTMLoss()
-        + sp.BinderTargetPAE()
-        + (-1.0) * sp.PLDDTLoss()
+        # Inverse folding: moves PSSM toward sequences ProteinMPNN predicts
+        # for the current predicted structure (continuous AF2-Cycler analogue)
+        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=4)
 
-        # ipSAE: Interface Predicted Score-Aligned Error (Dunbrack 2025).
-        # Complementary to ipTM — penalises high PAE on interface pairs.
-        # Uses differentiable Gaussian pae_logits approximation.
-        + (-1.0) * sp.BinderTargetIPSAE()
+        # PAE losses (return positive PAE values; minimise → lower PAE)
+        + 0.05 * sp.TargetBinderPAE()
+        + 0.05 * sp.BinderTargetPAE()
+        + 0.4  * sp.WithinBinderPAE()
 
-        # Inverse folding (ProteinMPNN) — reduced from 10x to 2x to prevent
-        # leucine-collapse (ProteinMPNN alone pushes toward hydrophobic repeats)
-        + 2.0 * ProteinMPNNLoss(mpnn=mpnn, num_samples=4)
+        # Confidence (return negative values; minimise → higher confidence)
+        + 0.025 * AF3IPTMLoss()
+        + 0.025 * sp.pTMEnergy()
+        + 0.1   * sp.PLDDTLoss()
     )
-    return loss
+    # NoCys: removes C from the 20-aa alphabet during optimisation
+    # (PSSM is 19-dimensional; NoCys re-inserts zero weight for C at decode)
+    return NoCys(loss=inner_loss)
 
 
 def design(
@@ -95,12 +112,15 @@ def design(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading AlphaFold 3 from {model_dir}...")
-    # num_recycling=1 for gradient optimization: backprop through 10 recycling steps
-    # would require ~10x more memory (168 GiB at N=112). Recycling=1 gives ~17 GiB.
-    # Final prediction uses a separate forward pass (predict()) which could use more.
+    # num_recycling=10: AF3 paper default (10 recycles + 1 = 11 trunk passes).
+    # With block_remat=True (gradient checkpointing), backprop memory is
+    # proportional to sqrt(num_recycling) rather than linear, making this
+    # feasible on A100-80GB at N=112 (52 target + 60 binder).
+    # diffusion_num_samples/steps=1: confidence losses (distogram, PAE, ipTM)
+    # come from the trunk, not the diffusion head, so 1 sample/step suffices.
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=1,
+        num_recycling=10,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )
@@ -122,8 +142,8 @@ def design(
     for trial in range(n_candidates):
         key, subkey = jax.random.split(key)
 
-        # Initialize PSSM uniformly on simplex
-        PSSM_init = jnp.ones((binder_length, 20)) / 20.0
+        # NoCys operates on a 19-dimensional PSSM (C excluded)
+        PSSM_init = jnp.ones((binder_length, 19)) / 19.0
 
         print(f"\n[Trial {trial+1}/{n_candidates}] Running simplex_APGM for {n_steps} steps...")
 
@@ -137,13 +157,14 @@ def design(
         )
         PSSM_opt = best_PSSM
 
-        # Decode best sequence
-        seq = "".join(TOKENS[int(i)] for i in jnp.argmax(PSSM_opt, axis=-1))
+        # Decode: re-insert zero Cys probability, then argmax
+        full_pssm = NoCys.sequence(PSSM_opt)
+        seq = "".join(TOKENS[int(i)] for i in jnp.argmax(full_pssm, axis=-1))
 
         # Final prediction
         print(f"  Final sequence: {seq}")
         pred = model.predict(
-            PSSM=PSSM_opt,
+            PSSM=full_pssm,
             features=features,
             writer=None,
             key=subkey,
@@ -161,7 +182,6 @@ def design(
 
         # Save structure
         out_cif = output_dir / f"binder_{trial:02d}_iptm{iptm:.3f}.cif"
-        # pred.st is a gemmi.Structure
         pred.st.make_mmcif_document().write_file(str(out_cif))
         print(f"  Saved: {out_cif}")
 

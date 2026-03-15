@@ -137,6 +137,9 @@ def smoke_test():
     from mosaic.common import TOKENS
     import mosaic.losses.structure_prediction as sp
     from mosaic.losses.structure_prediction import AF3IPTMLoss
+    from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
+    from mosaic.losses.transformations import NoCys
+    from mosaic.proteinmpnn.mpnn import load_mpnn
 
     MODEL_DIR = "/weights"
     BINDER_LENGTH = 5    # tiny for speed
@@ -144,51 +147,41 @@ def smoke_test():
     OUTPUT_DIR = "/results/rbx1_smoketest"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # For the smoke test: use only the RBX1 RING domain core (~50 aa, residues 44-93)
-    # so that N_total = 55 and the backward pass fits in GPU memory.
-    # The triangle attention intermediate is O(N^3); for N=55 this is ~1 GB vs ~393 GB for N=354.
-    # Full-sequence gradient optimization requires either Boltz-2 or gradient-free methods.
     RBX1_SEQ = "CPICLEMQEPVSTEAEKVLHVTRQKIFPLHPYLEMIRQELENHTLSEALRKA"  # 52 aa RING core
 
-    print("Loading AlphaFold 3 ...")
+    print("Loading AlphaFold 3 (num_recycling=10) ...")
     model = AlphaFold3(
         model_dir=MODEL_DIR,
-        num_recycling=1,
+        num_recycling=10,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )
+
+    print("Loading ProteinMPNN ...")
+    mpnn = load_mpnn()
 
     target = TargetChain(sequence=RBX1_SEQ, use_msa=False)
     print(f"Building features: binder={BINDER_LENGTH} aa, target={len(RBX1_SEQ)} aa")
     features, _ = model.binder_features(binder_length=BINDER_LENGTH, chains=[target])
 
-    # Smoke test: AF3-only losses (no ProteinMPNN to avoid heavy joltz/boltz deps)
-    # Uses AF3IPTMLoss (tmscore_adjusted_pae_interface) and BinderTargetIPSAE
-    # to verify gradient flow through all confidence metrics
-    loss_fn = (
-        (-1.0) * sp.BinderTargetContact()
-        + (-1.0) * AF3IPTMLoss()
-        + (-1.0) * sp.PLDDTLoss()
-        + (-1.0) * sp.BinderTargetIPSAE()
+    # Full reference loss (positive weights, NoCys wrapper, 19-dim PSSM)
+    inner_loss = (
+        1.0  * sp.BinderTargetContact()
+        + 1.0  * sp.WithinBinderContact()
+        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=4)
+        + 0.05 * sp.TargetBinderPAE()
+        + 0.05 * sp.BinderTargetPAE()
+        + 0.4  * sp.WithinBinderPAE()
+        + 0.025 * AF3IPTMLoss()
+        + 0.025 * sp.pTMEnergy()
+        + 0.1  * sp.PLDDTLoss()
     )
+    loss_fn = NoCys(loss=inner_loss)
     af3_loss = model.build_loss(loss=loss_fn, features=features)
-
-    # Diagnostic: check cleaned_struc in features
-    if 'cleaned_struc' in features:
-        cs = features['cleaned_struc']
-        print(f"cleaned_struc: type={type(cs)}, dtype={getattr(cs,'dtype','N/A')}, shape={getattr(cs,'shape','N/A')}, value={cs}")
-    # Diagnostic: find numpy arrays in af3_loss
-    import equinox as eqx
-    leaves = jax.tree_util.tree_leaves(eqx.filter(af3_loss, eqx.is_array))
-    numpy_leaves = [(i, type(l), getattr(l, 'dtype', None)) for i, l in enumerate(leaves) if isinstance(l, __import__('numpy').ndarray)]
-    if numpy_leaves:
-        print(f"WARNING: {len(numpy_leaves)} numpy arrays still in af3_loss at indices: {numpy_leaves[:5]}")
-    else:
-        print(f"All {len(leaves)} array leaves are JAX arrays ✓")
 
     key = jax.random.PRNGKey(42)
     key, subkey = jax.random.split(key)
-    PSSM_init = jnp.ones((BINDER_LENGTH, 20)) / 20.0
+    PSSM_init = jnp.ones((BINDER_LENGTH, 19)) / 19.0  # 19-dim: NoCys removes C
 
     print(f"Running simplex_APGM for {N_STEPS} steps ...")
     PSSM_opt, best_PSSM = simplex_APGM(
@@ -201,23 +194,12 @@ def smoke_test():
     )
     PSSM_opt = best_PSSM
 
-    seq = "".join(TOKENS[int(i)] for i in jnp.argmax(PSSM_opt, axis=-1))
+    full_pssm = NoCys.sequence(PSSM_opt)
+    seq = "".join(TOKENS[int(i)] for i in jnp.argmax(full_pssm, axis=-1))
     print(f"Optimized sequence: {seq}")
 
     print("Running final prediction ...")
-    pred = model.predict(PSSM=PSSM_opt, features=features, key=subkey)
-
-    # Debug: print AF3 result dict keys so we can verify all expected outputs are present
-    if hasattr(pred, '_result') and isinstance(pred._result, dict):
-        print(f"AF3 result dict keys: {list(pred._result.keys())}")
-        for k, v in pred._result.items():
-            shape = getattr(v, 'shape', None) or (type(v).__name__)
-            print(f"  {k}: {shape}")
-    elif hasattr(pred, 'result') and isinstance(pred.result, dict):
-        print(f"AF3 result dict keys: {list(pred.result.keys())}")
-        for k, v in pred.result.items():
-            shape = getattr(v, 'shape', None) or (type(v).__name__)
-            print(f"  {k}: {shape}")
+    pred = model.predict(PSSM=full_pssm, features=features, key=subkey)
 
     iptm = float(pred.iptm)
     plddt = float(jnp.mean(pred.plddt[:BINDER_LENGTH]))

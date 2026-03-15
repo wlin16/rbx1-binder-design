@@ -26,6 +26,7 @@ vol_results = modal.Volume.from_name("structure-results")
 
 mosaic_path = Path(__file__).parent / "mosaic"
 design_script = Path(__file__).parent / "design_rbx1_binder.py"
+design_script_v2 = Path(__file__).parent / "design_rbx1_binder_v2.py"
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -45,12 +46,11 @@ image = (
     )
     # joltz + boltz installed without deps to avoid conflicting JAX pins
     # pytorch_lightning needed by joltz/boltz at import time
-    .pip_install("pytorch_lightning")
-    .pip_install(
-        "git+https://github.com/nboyd/joltz",
-        "boltz",
-        extra_options="--no-deps",
-    )
+    # Install boltz WITH all its deps, then joltz --no-deps (avoids joltz pulling in boltz again)
+    .pip_install("boltz")
+    .pip_install("git+https://github.com/nboyd/joltz", extra_options="--no-deps")
+    # Reinstall jax[cuda12] last so it overrides any jax version boltz may have pinned
+    .pip_install("jax[cuda12]", extra_options="--upgrade")
     # Step 2b: PyTorch CPU (ProteinMPNN uses it for inverse folding)
     .pip_install(
         "torch",
@@ -81,6 +81,7 @@ image = (
     .add_local_dir(str(mosaic_path), remote_path="/mosaic", copy=True)
     .run_commands("pip install -e /mosaic --no-deps")
     .add_local_file(str(design_script), remote_path="/app/design_rbx1_binder.py", copy=True)
+    .add_local_file(str(design_script_v2), remote_path="/app/design_rbx1_binder_v2.py", copy=True)
 )
 
 app = modal.App("rbx1-binder-design", image=image)
@@ -135,6 +136,7 @@ def smoke_test():
     from mosaic.optimizers import simplex_APGM
     from mosaic.common import TOKENS
     import mosaic.losses.structure_prediction as sp
+    from mosaic.losses.structure_prediction import AF3IPTMLoss
 
     MODEL_DIR = "/weights"
     BINDER_LENGTH = 5    # tiny for speed
@@ -161,10 +163,13 @@ def smoke_test():
     features, _ = model.binder_features(binder_length=BINDER_LENGTH, chains=[target])
 
     # Smoke test: AF3-only losses (no ProteinMPNN to avoid heavy joltz/boltz deps)
+    # Uses AF3IPTMLoss (tmscore_adjusted_pae_interface) and BinderTargetIPSAE
+    # to verify gradient flow through all confidence metrics
     loss_fn = (
         (-1.0) * sp.BinderTargetContact()
-        + (-1.0) * sp.IPTMLoss()
+        + (-1.0) * AF3IPTMLoss()
         + (-1.0) * sp.PLDDTLoss()
+        + (-1.0) * sp.BinderTargetIPSAE()
     )
     af3_loss = model.build_loss(loss=loss_fn, features=features)
 
@@ -201,6 +206,19 @@ def smoke_test():
 
     print("Running final prediction ...")
     pred = model.predict(PSSM=PSSM_opt, features=features, key=subkey)
+
+    # Debug: print AF3 result dict keys so we can verify all expected outputs are present
+    if hasattr(pred, '_result') and isinstance(pred._result, dict):
+        print(f"AF3 result dict keys: {list(pred._result.keys())}")
+        for k, v in pred._result.items():
+            shape = getattr(v, 'shape', None) or (type(v).__name__)
+            print(f"  {k}: {shape}")
+    elif hasattr(pred, 'result') and isinstance(pred.result, dict):
+        print(f"AF3 result dict keys: {list(pred.result.keys())}")
+        for k, v in pred.result.items():
+            shape = getattr(v, 'shape', None) or (type(v).__name__)
+            print(f"  {k}: {shape}")
+
     iptm = float(pred.iptm)
     plddt = float(jnp.mean(pred.plddt[:BINDER_LENGTH]))
     print(f"ipTM={iptm:.3f}  pLDDT(binder)={plddt:.1f}")
@@ -215,13 +233,13 @@ def smoke_test():
 
 # ─── Full design run ──────────────────────────────────────────────────────────
 @app.function(
-    gpu="A100",
+    gpu="A100-80GB",
     volumes={
         "/weights": vol_weights,
         "/results": vol_results,
     },
     cpu=16,
-    memory=65536,
+    memory=131072,
     timeout=7200,
 )
 def full_design(
@@ -250,14 +268,55 @@ def full_design(
     return results
 
 
+# ─── Strategy 2: hotspot-biased PSSM + rebalanced losses ──────────────────────
+@app.function(
+    gpu="A100-80GB",
+    volumes={
+        "/weights": vol_weights,
+        "/results": vol_results,
+    },
+    cpu=16,
+    memory=131072,
+    timeout=14400,  # 4h for 500 steps × 8 candidates
+)
+def full_design_v2(
+    binder_length: int = 60,
+    n_steps: int = 500,
+    n_candidates: int = 8,
+    seed: int = 99,
+):
+    """Strategy 2: hotspot-biased PSSM init + rebalanced losses (500 steps)."""
+    sys.path.insert(0, "/mosaic/src")
+    sys.path.insert(0, "/app")
+
+    import importlib
+    import design_rbx1_binder_v2 as drb2
+    importlib.reload(drb2)
+
+    results = drb2.design(
+        model_dir="/weights",
+        binder_length=binder_length,
+        n_steps=n_steps,
+        n_candidates=n_candidates,
+        output_dir="/results/rbx1_v2",
+        seed=seed,
+    )
+    vol_results.commit()
+    return results
+
+
 # ─── Local entrypoint ─────────────────────────────────────────────────────────
 @app.local_entrypoint()
-def main(full: bool = False):
+def main(full: bool = False, v2: bool = False):
     # Step 1: make sure weights are decompressed
     weight_path = decompress_weights.remote()
     print(f"Weights ready at: {weight_path}")
 
-    if full:
+    if v2:
+        print("\nLaunching Strategy 2 design (A100-80GB, ~3-4h) ...")
+        results = full_design_v2.remote()
+        print(f"\n✓ Strategy 2 done: {results}")
+    elif full:
         print("\nLaunching full design (A100, ~1-2h) ...")
         results = full_design.remote()
     else:

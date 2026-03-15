@@ -30,6 +30,7 @@ from mosaic.structure_prediction import TargetChain
 from mosaic.optimizers import simplex_APGM
 from mosaic.common import TOKENS
 import mosaic.losses.structure_prediction as sp
+from mosaic.losses.structure_prediction import AF3IPTMLoss
 from mosaic.losses.protein_mpnn import ProteinMPNNLoss
 from mosaic.proteinmpnn.mpnn import load_mpnn
 
@@ -64,13 +65,20 @@ def build_losses(mpnn):
         (-1.0) * sp.BinderTargetContact()
         + (-1.0) * sp.WithinBinderContact()
 
-        # Confidence
-        + (-1.0) * sp.IPTMLoss()
+        # Confidence — AF3IPTMLoss uses tmscore_adjusted_pae_interface (fully differentiable)
+        # instead of reconstructed pae_logits. Falls back to IPTMLoss for non-AF3 models.
+        + (-1.0) * AF3IPTMLoss()
         + sp.BinderTargetPAE()
         + (-1.0) * sp.PLDDTLoss()
 
-        # Inverse folding (ProteinMPNN) for sequence recoverability
-        + 10.0 * ProteinMPNNLoss(mpnn=mpnn, num_samples=4)
+        # ipSAE: Interface Predicted Score-Aligned Error (Dunbrack 2025).
+        # Complementary to ipTM — penalises high PAE on interface pairs.
+        # Uses differentiable Gaussian pae_logits approximation.
+        + (-1.0) * sp.BinderTargetIPSAE()
+
+        # Inverse folding (ProteinMPNN) — reduced from 10x to 2x to prevent
+        # leucine-collapse (ProteinMPNN alone pushes toward hydrophobic repeats)
+        + 2.0 * ProteinMPNNLoss(mpnn=mpnn, num_samples=4)
     )
     return loss
 
@@ -87,7 +95,15 @@ def design(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading AlphaFold 3 from {model_dir}...")
-    model = AlphaFold3(model_dir=model_dir)
+    # num_recycling=1 for gradient optimization: backprop through 10 recycling steps
+    # would require ~10x more memory (168 GiB at N=112). Recycling=1 gives ~17 GiB.
+    # Final prediction uses a separate forward pass (predict()) which could use more.
+    model = AlphaFold3(
+        model_dir=model_dir,
+        num_recycling=1,
+        diffusion_num_samples=1,
+        diffusion_num_steps=1,
+    )
 
     print("Loading ProteinMPNN...")
     mpnn = load_mpnn()

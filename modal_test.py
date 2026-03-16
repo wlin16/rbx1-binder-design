@@ -149,10 +149,10 @@ def smoke_test():
 
     RBX1_SEQ = "CPICLEMQEPVSTEAEKVLHVTRQKIFPLHPYLEMIRQELENHTLSEALRKA"  # 52 aa RING core
 
-    print("Loading AlphaFold 3 (num_recycling=10) ...")
+    print("Loading AlphaFold 3 (num_recycling=3) ...")
     model = AlphaFold3(
         model_dir=MODEL_DIR,
-        num_recycling=10,
+        num_recycling=3,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )

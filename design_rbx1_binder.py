@@ -23,7 +23,9 @@ Loss weights mirror the Mosaic reference (escalante-bio blog):
     0.1  * PLDDTLoss
 Wrapped in NoCys to exclude cysteine from binder.
 
-num_recycling=10: AF3 default (paper uses 10+1 passes).
+num_recycling=3: compromise between gradient quality and memory.
+  AF3 inference default is 10, but backprop through 10 recycling steps
+  needs ~48 GiB even at N=57; 3 steps fits on A100-80GB at N=112.
 diffusion_num_samples/steps=1: minimised for gradient memory on A100-80GB.
 """
 
@@ -113,7 +115,7 @@ def design(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading AlphaFold 3 from {model_dir}...")
-    # num_recycling=10: AF3 paper default (10 recycles + 1 = 11 trunk passes).
+    # num_recycling=3: AF3 paper default (10 recycles + 1 = 11 trunk passes).
     # With block_remat=True (gradient checkpointing), backprop memory is
     # proportional to sqrt(num_recycling) rather than linear, making this
     # feasible on A100-80GB at N=112 (52 target + 60 binder).
@@ -121,7 +123,7 @@ def design(
     # come from the trunk, not the diffusion head, so 1 sample/step suffices.
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=10,
+        num_recycling=3,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )

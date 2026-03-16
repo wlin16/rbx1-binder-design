@@ -233,6 +233,7 @@ def full_design(
 ):
     """Full RBX1 binder design run — 8 candidates × 200 steps on A100."""
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
     sys.path.insert(0, "/mosaic/src")
     sys.path.insert(0, "/app")
 
@@ -270,11 +271,13 @@ def full_design_v2(
     seed: int = 99,
 ):
     """Strategy 2: hotspot-biased PSSM init + rebalanced losses (500 steps)."""
-    # Disable JAX memory pre-allocation so XLA can use the full GPU dynamically.
-    # Default pre-alloc is 75% of 74.5 GiB = ~55.9 GiB.  num_recycling=3 at
-    # N=112 needs ~70.6 GiB which fits in the full 71.5 GiB available budget,
-    # but not in the pre-allocated pool.
+    # Memory allocator tuning for N=112 at num_recycling=3 (~70 GiB peak):
+    #   PREALLOCATE=false: don't lock 75% of GPU upfront; grow pool on-demand.
+    #   cuda_malloc_async: use CUDA VMM so non-contiguous physical pages can
+    #     satisfy a large virtual allocation — eliminates fragmentation failures
+    #     after loading model weights (XLA recommends this for large workloads).
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
     sys.path.insert(0, "/mosaic/src")
     sys.path.insert(0, "/app")
 

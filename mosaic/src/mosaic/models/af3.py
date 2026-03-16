@@ -170,10 +170,16 @@ class AF3Loss(LossTerm):
         # before passing to JIT-compiled apply_fn — JAX cannot trace them.
         feats_jit = {k: v for k, v in feats.items()
                      if not (isinstance(v, np.ndarray) and v.dtype.kind == 'O')}
-        # jax.checkpoint: during backward pass, recompute AF3 intermediate activations
-        # instead of storing them. This reduces peak memory from ~393 GiB (storing all
-        # 48 Evoformer + diffusion activations) to ~30-40 GB (only store I/O at boundary).
-        result = jax.checkpoint(self.apply_fn)(self.params, key, feats_jit)
+        # Do NOT wrap with jax.checkpoint here. A single outer checkpoint over the
+        # entire apply_fn creates one large rematerialization boundary that prevents
+        # XLA's HLO rematerialization from optimally reducing memory across the full
+        # computation graph.  Instead, rely on:
+        #   1. block_remat=True in cfg.evoformer.pairformer (per-block checkpointing)
+        #   2. block_remat=True in cfg.heads.diffusion.transformer
+        #   3. XLA's automatic HLO rematerialization (can reach ~55 GiB vs ~70 GiB)
+        # Together these let the compiler reach the theoretical minimum ~55 GiB,
+        # fitting on A100-80GB (74.5 GiB available after weights + overhead).
+        result = self.apply_fn(self.params, key, feats_jit)
         output = AF3Output(batch=feats, result=result)
         v, aux = self.loss(sequence=sequence, output=output, key=key)
         return v, {"af3": aux}

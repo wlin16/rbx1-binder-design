@@ -180,6 +180,14 @@ class AF3Loss(LossTerm):
         # Together these let the compiler reach the theoretical minimum ~55 GiB,
         # fitting on A100-80GB (74.5 GiB available after weights + overhead).
         result = self.apply_fn(self.params, key, feats_jit)
+        # Stop gradient through diffusion samples (atom_positions used by ProteinMPNN).
+        # The diffusion backward pass operates at atom resolution (N_atoms >> N_residues)
+        # and dominates the ~70 GiB peak memory.  Our PAE/distogram/pLDDT losses provide
+        # structural gradient signal through the trunk directly.  With diffusion_num_steps=1
+        # the predicted coordinates are too noisy to carry a meaningful gradient anyway.
+        if "diffusion_samples" in result:
+            result = {**result,
+                      "diffusion_samples": jax.lax.stop_gradient(result["diffusion_samples"])}
         output = AF3Output(batch=feats, result=result)
         v, aux = self.loss(sequence=sequence, output=output, key=key)
         return v, {"af3": aux}

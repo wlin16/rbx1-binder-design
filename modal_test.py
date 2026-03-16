@@ -233,7 +233,7 @@ def full_design(
 ):
     """Full RBX1 binder design run — 8 candidates × 200 steps on A100."""
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+    os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "cuda_malloc_async"
     sys.path.insert(0, "/mosaic/src")
     sys.path.insert(0, "/app")
 
@@ -277,7 +277,7 @@ def full_design_v2(
     #     satisfy a large virtual allocation — eliminates fragmentation failures
     #     after loading model weights (XLA recommends this for large workloads).
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+    os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "cuda_malloc_async"
     sys.path.insert(0, "/mosaic/src")
     sys.path.insert(0, "/app")
 

@@ -113,7 +113,7 @@ def build_losses(mpnn):
         + 0.025 * sp.pTMEnergy()
         + 0.1   * sp.PLDDTLoss()
     )
-    return NoCys(loss=inner_loss)
+    return inner_loss
 
 
 def design(
@@ -142,8 +142,8 @@ def design(
     print(f"Building features: binder_length={binder_length}, target_length={len(RBX1_SEQUENCE)}")
     features, _ = model.binder_features(binder_length=binder_length, chains=[target])
 
-    loss_fn = build_losses(mpnn)
-    af3_loss = model.build_loss(loss=loss_fn, features=features)
+    inner_loss = build_losses(mpnn)
+    af3_loss = NoCys(loss=model.build_loss(loss=inner_loss, features=features))
 
     key = jax.random.PRNGKey(seed)
     results = []

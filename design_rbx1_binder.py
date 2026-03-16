@@ -95,9 +95,10 @@ def build_losses(mpnn):
         + 0.025 * sp.pTMEnergy()
         + 0.1   * sp.PLDDTLoss()
     )
-    # NoCys: removes C from the 20-aa alphabet during optimisation
-    # (PSSM is 19-dimensional; NoCys re-inserts zero weight for C at decode)
-    return NoCys(loss=inner_loss)
+    # Return inner_loss separately — NoCys must wrap the entire AF3Loss,
+    # not just the inner combination, so that set_binder_sequence receives
+    # the full 20-dim PSSM (NoCys converts 19→20 before calling AF3Loss).
+    return inner_loss
 
 
 def design(
@@ -132,8 +133,8 @@ def design(
     print(f"Building features: binder_length={binder_length}, target_length={len(RBX1_SEQUENCE)}")
     features, _ = model.binder_features(binder_length=binder_length, chains=[target])
 
-    loss_fn = build_losses(mpnn)
-    af3_loss = model.build_loss(loss=loss_fn, features=features)
+    inner_loss = build_losses(mpnn)
+    af3_loss = NoCys(loss=model.build_loss(loss=inner_loss, features=features))
 
     # ── Optimization ──────────────────────────────────────────────────────
     key = jax.random.PRNGKey(seed)

@@ -164,7 +164,9 @@ def smoke_test():
     print(f"Building features: binder={BINDER_LENGTH} aa, target={len(RBX1_SEQ)} aa")
     features, _ = model.binder_features(binder_length=BINDER_LENGTH, chains=[target])
 
-    # Full reference loss (positive weights, NoCys wrapper, 19-dim PSSM)
+    # Full reference loss (positive weights, 19-dim PSSM via NoCys)
+    # NoCys must wrap the entire AF3Loss (not just inner_loss) so that
+    # set_binder_sequence receives the full 20-dim PSSM after Cys is re-inserted.
     inner_loss = (
         1.0  * sp.BinderTargetContact()
         + 1.0  * sp.WithinBinderContact()
@@ -176,8 +178,7 @@ def smoke_test():
         + 0.025 * sp.pTMEnergy()
         + 0.1  * sp.PLDDTLoss()
     )
-    loss_fn = NoCys(loss=inner_loss)
-    af3_loss = model.build_loss(loss=loss_fn, features=features)
+    af3_loss = NoCys(loss=model.build_loss(loss=inner_loss, features=features))
 
     key = jax.random.PRNGKey(42)
     key, subkey = jax.random.split(key)

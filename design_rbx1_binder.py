@@ -115,13 +115,12 @@ def design(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading AlphaFold 3 from {model_dir}...")
-    # num_recycling=1: OOM analysis shows N=112 at recycling=3 still needs
-    # ~70 GiB even with block_remat=True (A100-80GB). Reducing to 1 recycling
-    # step cuts gradient memory ~3x to ~23 GiB, fitting comfortably on A100-80GB.
-    # diffusion_num_samples/steps=1: losses come from trunk+confidence head.
+    # num_recycling=3: 3 Evoformer recycling steps.
+    # Requires XLA_PYTHON_CLIENT_PREALLOCATE=false (set by Modal entrypoints) so
+    # JAX allocates memory dynamically; default 75% pre-alloc pool is too small.
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=1,
+        num_recycling=3,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )

@@ -130,7 +130,7 @@ def design(
     print(f"Loading AlphaFold 3 from {model_dir}...")
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=1,
+        num_recycling=3,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )

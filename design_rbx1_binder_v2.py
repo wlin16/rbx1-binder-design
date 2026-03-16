@@ -105,7 +105,7 @@ def build_losses(mpnn):
     inner_loss = (
         1.0  * sp.BinderTargetContact()
         + 1.0  * sp.WithinBinderContact()
-        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=4)
+        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=1)
         + 0.05 * sp.TargetBinderPAE()
         + 0.05 * sp.BinderTargetPAE()
         + 0.4  * sp.WithinBinderPAE()
@@ -130,7 +130,7 @@ def design(
     print(f"Loading AlphaFold 3 from {model_dir}...")
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=3,
+        num_recycling=1,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )

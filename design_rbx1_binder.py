@@ -85,7 +85,7 @@ def build_losses(mpnn):
 
         # Inverse folding: moves PSSM toward sequences ProteinMPNN predicts
         # for the current predicted structure (continuous AF2-Cycler analogue)
-        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=4)
+        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=1)
 
         # PAE losses (return positive PAE values; minimise → lower PAE)
         + 0.05 * sp.TargetBinderPAE()
@@ -115,15 +115,13 @@ def design(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading AlphaFold 3 from {model_dir}...")
-    # num_recycling=3: AF3 paper default (10 recycles + 1 = 11 trunk passes).
-    # With block_remat=True (gradient checkpointing), backprop memory is
-    # proportional to sqrt(num_recycling) rather than linear, making this
-    # feasible on A100-80GB at N=112 (52 target + 60 binder).
-    # diffusion_num_samples/steps=1: confidence losses (distogram, PAE, ipTM)
-    # come from the trunk, not the diffusion head, so 1 sample/step suffices.
+    # num_recycling=1: OOM analysis shows N=112 at recycling=3 still needs
+    # ~70 GiB even with block_remat=True (A100-80GB). Reducing to 1 recycling
+    # step cuts gradient memory ~3x to ~23 GiB, fitting comfortably on A100-80GB.
+    # diffusion_num_samples/steps=1: losses come from trunk+confidence head.
     model = AlphaFold3(
         model_dir=model_dir,
-        num_recycling=3,
+        num_recycling=1,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )

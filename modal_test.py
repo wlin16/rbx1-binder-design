@@ -149,10 +149,10 @@ def smoke_test():
 
     RBX1_SEQ = "CPICLEMQEPVSTEAEKVLHVTRQKIFPLHPYLEMIRQELENHTLSEALRKA"  # 52 aa RING core
 
-    print("Loading AlphaFold 3 (num_recycling=3) ...")
+    print("Loading AlphaFold 3 (num_recycling=1) ...")
     model = AlphaFold3(
         model_dir=MODEL_DIR,
-        num_recycling=3,
+        num_recycling=1,
         diffusion_num_samples=1,
         diffusion_num_steps=1,
     )
@@ -170,7 +170,7 @@ def smoke_test():
     inner_loss = (
         1.0  * sp.BinderTargetContact()
         + 1.0  * sp.WithinBinderContact()
-        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=4)
+        + 10.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.array(0.001), num_samples=1)
         + 0.05 * sp.TargetBinderPAE()
         + 0.05 * sp.BinderTargetPAE()
         + 0.4  * sp.WithinBinderPAE()

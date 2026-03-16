@@ -27,6 +27,7 @@ vol_results = modal.Volume.from_name("structure-results")
 mosaic_path = Path(__file__).parent / "mosaic"
 design_script = Path(__file__).parent / "design_rbx1_binder.py"
 design_script_v2 = Path(__file__).parent / "design_rbx1_binder_v2.py"
+design_script_boltz2 = Path(__file__).parent / "design_rbx1_binder_boltz2.py"
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -82,6 +83,7 @@ image = (
     .run_commands("pip install -e /mosaic --no-deps")
     .add_local_file(str(design_script), remote_path="/app/design_rbx1_binder.py", copy=True)
     .add_local_file(str(design_script_v2), remote_path="/app/design_rbx1_binder_v2.py", copy=True)
+    .add_local_file(str(design_script_boltz2), remote_path="/app/design_rbx1_binder_boltz2.py", copy=True)
 )
 
 app = modal.App("rbx1-binder-design", image=image)
@@ -297,10 +299,54 @@ def full_design_v2(
     return results
 
 
+# ─── Boltz-2 full design ──────────────────────────────────────────────────────
+@app.function(
+    gpu="A100",
+    volumes={"/results": vol_results},
+    cpu=8,
+    memory=32768,
+    timeout=7200,
+)
+def full_design_boltz2(
+    binder_length: int = 60,
+    n_steps: int = 200,
+    n_candidates: int = 8,
+    recycling_steps: int = 3,
+    sampling_steps: int = 25,
+    seed: int = 42,
+):
+    """Boltz-2 binder design — much lighter than AF3, no OOM issues."""
+    sys.path.insert(0, "/mosaic/src")
+    sys.path.insert(0, "/app")
+
+    import importlib
+    import design_rbx1_binder_boltz2 as drb
+    importlib.reload(drb)
+
+    results = drb.design(
+        cache_path=None,  # auto-download to ~/.boltz/
+        binder_length=binder_length,
+        n_steps=n_steps,
+        n_candidates=n_candidates,
+        recycling_steps=recycling_steps,
+        sampling_steps=sampling_steps,
+        output_dir="/results/rbx1_boltz2",
+        seed=seed,
+    )
+    vol_results.commit()
+    return results
+
+
 # ─── Local entrypoint ─────────────────────────────────────────────────────────
 @app.local_entrypoint()
-def main(full: bool = False, v2: bool = False):
-    # Step 1: make sure weights are decompressed
+def main(full: bool = False, v2: bool = False, boltz2: bool = False):
+    if boltz2:
+        print("\nLaunching Boltz-2 design (A100-40GB, ~1-2h) ...")
+        results = full_design_boltz2.remote()
+        print(f"\n✓ Boltz-2 done: {results}")
+        return
+
+    # AF3 paths require weights to be decompressed first
     weight_path = decompress_weights.remote()
     print(f"Weights ready at: {weight_path}")
 

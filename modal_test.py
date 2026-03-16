@@ -50,8 +50,9 @@ image = (
     # Install boltz WITH all its deps, then joltz --no-deps (avoids joltz pulling in boltz again)
     .pip_install("boltz")
     .pip_install("git+https://github.com/nboyd/joltz", extra_options="--no-deps")
-    # Reinstall jax[cuda12] last so it overrides any jax version boltz may have pinned
-    .pip_install("jax[cuda12]", extra_options="--upgrade")
+    # Reinstall jax[cuda12] last so it overrides any jax version boltz may have pinned.
+    # Pin numpy<2.2: boltz depends on numba which requires numpy<=2.1.
+    .pip_install("jax[cuda12]", "numpy<2.2", extra_options="--upgrade")
     # Step 2b: PyTorch CPU (ProteinMPNN uses it for inverse folding)
     .pip_install(
         "torch",
